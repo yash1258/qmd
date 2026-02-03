@@ -29,6 +29,7 @@ import {
   getStatus,
   hashContent,
   extractTitle,
+  formatJsonlConversation,
   formatDocForEmbedding,
   formatQueryForEmbedding,
   chunkDocument,
@@ -1403,7 +1404,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
     const path = handelize(relativeFile); // Normalize path for token-friendliness
     seenPaths.add(path);
 
-    const content = readFileSync(filepath, "utf-8");
+    let content = readFileSync(filepath, "utf-8");
 
     // Skip empty files - nothing useful to index
     if (!content.trim()) {
@@ -1411,8 +1412,23 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
       continue;
     }
 
+    // For JSONL conversation files, convert to searchable plain text
+    // This extracts user/assistant messages with role prefixes
+    // Note: Extract title BEFORE formatting so we can parse the original JSON
+    let title: string;
+    if (relativeFile.endsWith('.jsonl')) {
+      title = extractTitle(content, relativeFile);  // Extract from original
+      content = formatJsonlConversation(content);   // Then format for indexing
+      // Skip if formatter produced empty output (e.g., file has no messages)
+      if (!content.trim()) {
+        processed++;
+        continue;
+      }
+    } else {
+      title = extractTitle(content, relativeFile);
+    }
+
     const hash = await hashContent(content);
-    const title = extractTitle(content, relativeFile);
 
     // Check if document exists in this collection with this path
     const existing = findActiveDocument(db, collectionName, path);

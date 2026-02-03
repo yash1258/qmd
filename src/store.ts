@@ -76,7 +76,7 @@ export function homedir(): string {
  */
 export function isAbsolutePath(path: string): boolean {
   if (!path) return false;
-  
+
   // Unix absolute path
   if (path.startsWith('/')) {
     // Check if it's a Git Bash style path like /c/ or /c/Users (C-Z only, not A or B)
@@ -90,12 +90,12 @@ export function isAbsolutePath(path: string): boolean {
     // Any other path starting with / is Unix absolute
     return true;
   }
-  
+
   // Windows native path: C:\ or C:/ (any letter A-Z)
   if (path.length >= 2 && /[a-zA-Z]/.test(path[0]!) && path[1] === ':') {
     return true;
   }
-  
+
   return false;
 }
 
@@ -117,25 +117,25 @@ export function getRelativePathFromPrefix(path: string, prefix: string): string 
   if (!prefix) {
     return null;
   }
-  
+
   const normalizedPath = normalizePathSeparators(path);
   const normalizedPrefix = normalizePathSeparators(prefix);
-  
+
   // Ensure prefix ends with / for proper matching
-  const prefixWithSlash = !normalizedPrefix.endsWith('/') 
-    ? normalizedPrefix + '/' 
+  const prefixWithSlash = !normalizedPrefix.endsWith('/')
+    ? normalizedPrefix + '/'
     : normalizedPrefix;
-  
+
   // Exact match
   if (normalizedPath === normalizedPrefix) {
     return '';
   }
-  
+
   // Check if path starts with prefix
   if (normalizedPath.startsWith(prefixWithSlash)) {
     return normalizedPath.slice(prefixWithSlash.length);
   }
-  
+
   return null;
 }
 
@@ -143,18 +143,18 @@ export function resolve(...paths: string[]): string {
   if (paths.length === 0) {
     throw new Error("resolve: at least one path segment is required");
   }
-  
+
   // Normalize all paths to use forward slashes
   const normalizedPaths = paths.map(normalizePathSeparators);
-  
+
   let result = '';
   let windowsDrive = '';
-  
+
   // Check if first path is absolute
   const firstPath = normalizedPaths[0]!;
   if (isAbsolutePath(firstPath)) {
     result = firstPath;
-    
+
     // Extract Windows drive letter if present
     if (firstPath.length >= 2 && /[a-zA-Z]/.test(firstPath[0]!) && firstPath[1] === ':') {
       windowsDrive = firstPath.slice(0, 2);
@@ -170,7 +170,7 @@ export function resolve(...paths: string[]): string {
   } else {
     // Start with PWD or cwd, then append the first relative path
     const pwd = normalizePathSeparators(Bun.env.PWD || process.cwd());
-    
+
     // Extract Windows drive from PWD if present
     if (pwd.length >= 2 && /[a-zA-Z]/.test(pwd[0]!) && pwd[1] === ':') {
       windowsDrive = pwd.slice(0, 2);
@@ -179,14 +179,14 @@ export function resolve(...paths: string[]): string {
       result = pwd + '/' + firstPath;
     }
   }
-  
+
   // Process remaining paths
   for (let i = 1; i < normalizedPaths.length; i++) {
     const p = normalizedPaths[i]!;
     if (isAbsolutePath(p)) {
       // Absolute path replaces everything
       result = p;
-      
+
       // Update Windows drive if present
       if (p.length >= 2 && /[a-zA-Z]/.test(p[0]!) && p[1] === ':') {
         windowsDrive = p.slice(0, 2);
@@ -208,7 +208,7 @@ export function resolve(...paths: string[]): string {
       result = result + '/' + p;
     }
   }
-  
+
   // Normalize . and .. components
   const parts = result.split('/').filter(Boolean);
   const normalized: string[] = [];
@@ -219,15 +219,15 @@ export function resolve(...paths: string[]): string {
       normalized.push(part);
     }
   }
-  
+
   // Build final path
   const finalPath = '/' + normalized.join('/');
-  
+
   // Prepend Windows drive if present
   if (windowsDrive) {
     return windowsDrive + finalPath;
   }
-  
+
   return finalPath;
 }
 
@@ -1058,7 +1058,42 @@ const titleExtractors: Record<string, (content: string) => string | null> = {
     if (heading?.[1]) return heading[1].trim();
     return null;
   },
+  // JSONL conversation files (e.g., Clawdbot sessions)
+  // Extracts title from first REAL user message (skips system prompts)
+  '.jsonl': (content) => {
+    const lines = content.split('\n');
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const obj = JSON.parse(line);
+        // Look for message type with user role
+        if (obj.type === 'message' && obj.message?.role === 'user') {
+          const textContent = obj.message.content?.find(
+            (c: { type: string }) => c.type === 'text'
+          );
+          if (textContent?.text) {
+            const text = textContent.text.trim();
+            // Skip system-like messages to find real user input
+            if (
+              text.startsWith('A new session was started') ||
+              text.startsWith('Read HEARTBEAT') ||
+              text.startsWith('System:') ||
+              text.startsWith('[Queued messages') ||
+              text.includes('[message_id:')
+            ) {
+              continue; // Skip this, look for next user message
+            }
+            // Found a real user message - use as title
+            const title = text.slice(0, 80).replace(/\n/g, ' ').trim();
+            return title + (text.length > 80 ? '...' : '');
+          }
+        }
+      } catch { continue; }
+    }
+    return null;
+  },
 };
+
 
 export function extractTitle(content: string, filename: string): string {
   const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase();
@@ -1069,6 +1104,54 @@ export function extractTitle(content: string, filename: string): string {
   }
   return filename.replace(/\.[^.]+$/, "").split("/").pop() || filename;
 }
+
+/**
+ * Format JSONL conversation file into searchable text.
+ * 
+ * Converts conversation messages to plain text with role prefixes:
+ * - [USER] for user messages
+ * - [ASSISTANT] for assistant responses  
+ * - [THINKING] for reasoning content (can be filtered out)
+ * 
+ * Skips: session metadata, tool calls, tool results
+ */
+export function formatJsonlConversation(content: string): string {
+  const lines = content.split('\n').filter(l => l.trim());
+  const parts: string[] = [];
+
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line);
+
+      // Skip non-message types (session, toolResult, custom)
+      if (obj.type !== 'message') continue;
+
+      const role = obj.message?.role;
+      const contentBlocks = obj.message?.content || [];
+
+      // Skip tool results (role = 'toolResult')
+      if (role === 'toolResult') continue;
+
+      for (const block of contentBlocks) {
+        if (block.type === 'thinking' && block.thinking) {
+          // Include thinking with prefix so it can be filtered later
+          parts.push(`[THINKING] ${block.thinking}`);
+        } else if (block.type === 'text' && block.text) {
+          // Prefix with role for context in search results
+          const prefix = role === 'user' ? '[USER]' : '[ASSISTANT]';
+          parts.push(`${prefix} ${block.text}`);
+        }
+        // Skip toolCall blocks
+      }
+    } catch {
+      // Skip malformed lines silently
+      continue;
+    }
+  }
+
+  return parts.join('\n\n');
+}
+
 
 // =============================================================================
 // Document indexing operations
@@ -1350,7 +1433,7 @@ export function normalizeDocid(docid: string): string {
 
   // Strip surrounding quotes (single or double)
   if ((normalized.startsWith('"') && normalized.endsWith('"')) ||
-      (normalized.startsWith("'") && normalized.endsWith("'"))) {
+    (normalized.startsWith("'") && normalized.endsWith("'"))) {
     normalized = normalized.slice(1, -1);
   }
 
